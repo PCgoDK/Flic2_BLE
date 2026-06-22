@@ -1,7 +1,7 @@
 # Flic 2 BLE Integration for Home Assistant
 
 <p align="center">
-  <img src="icon.svg" alt="Flic 2 BLE icon" width="160" />
+  <img src="custom_components/flic_ble/brand/logo.png" alt="Flic 2 BLE logo" width="160" />
 </p>
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
