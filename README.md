@@ -5,7 +5,7 @@
 </p>
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/release/bassrock/flic_ble.svg)](https://github.com/bassrock/flic_ble/releases)
+[![GitHub Release](https://img.shields.io/github/release/PCgoDK/Flic2_BLE.svg)](https://github.com/PCgoDK/Flic2_BLE/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A Home Assistant custom integration for Flic 2 smart buttons using direct Bluetooth Low Energy (BLE) communication. No Flic Hub required.
@@ -33,14 +33,14 @@ A Home Assistant custom integration for Flic 2 smart buttons using direct Blueto
 1. Open HACS in Home Assistant
 2. Click the three dots menu in the top right corner
 3. Select "Custom repositories"
-4. Add `https://github.com/bassrock/flic_ble` with category "Integration"
+4. Add `https://github.com/PCgoDK/Flic2_BLE` with category "Integration"
 5. Click "Add"
 6. Search for "Flic 2 BLE" and install it
 7. Restart Home Assistant
 
 ### Manual Installation
 
-1. Download the latest release from [GitHub](https://github.com/bassrock/flic_ble/releases)
+1. Download the latest release from [GitHub](https://github.com/PCgoDK/Flic2_BLE/releases)
 2. Extract and copy the `custom_components/flic_ble` folder to your Home Assistant `config/custom_components/` directory
 3. Restart Home Assistant
 
@@ -223,7 +223,7 @@ logger:
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit issues and pull requests on [GitHub](https://github.com/bassrock/flic_ble).
+Contributions are welcome! Please feel free to submit issues and pull requests on [GitHub](https://github.com/PCgoDK/Flic2_BLE).
 
 ## License
 
