@@ -1,0 +1,59 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select Flic 2 button",
+        "description": "Select the Flic 2 button you want to set up.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "confirm_pair": {
+        "title": "Pair with {name}",
+        "description": "Hold the Flic button for 8 seconds until the LED blinks rapidly, then click Submit to pair."
+      },
+      "reauth_confirm": {
+        "title": "Re-pair with {name}",
+        "description": "The button pairing was lost. Hold the Flic button for 8 seconds until the LED blinks rapidly, then click Submit to re-pair."
+      }
+    },
+    "error": {
+      "pairing_timeout": "Pairing timed out. Ensure the button is in pairing mode (hold for 8 seconds until LED blinks rapidly).",
+      "pairing_failed": "Pairing failed. Try again and ensure you are within range of the button.",
+      "not_in_pairing_mode": "Button is not in pairing mode. Hold the button for 8 seconds until the LED blinks rapidly (blue/red alternating), then try again.",
+      "cannot_connect": "Cannot connect to the device. Ensure it is within range and try again."
+    },
+    "abort": {
+      "already_configured": "This button is already configured.",
+      "no_devices_found": "No Flic 2 buttons found nearby. Make sure your button is awake (press it once)."
+    }
+  },
+  "entity": {
+    "event": {
+      "button": {
+        "name": "Button",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "single_press": "Single press",
+              "double_press": "Double press",
+              "hold": "Hold"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      }
+    }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "single_press": "Button single pressed",
+      "double_press": "Button double pressed",
+      "hold": "Button held"
+    }
+  }
+}

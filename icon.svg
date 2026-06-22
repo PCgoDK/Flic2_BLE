@@ -1,0 +1,28 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="52" y1="72" x2="460" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5D4FE7"/>
+      <stop offset="1" stop-color="#38B8F3"/>
+    </linearGradient>
+    <linearGradient id="cut" x1="128" y1="378" x2="301" y2="510" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#51C8F0" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#2FA6E7" stop-opacity="0.95"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="256" cy="256" r="220" fill="url(#bg)"/>
+
+  <path d="M78 352L256 214L256 302L204 254L184 275L256 334L256 424L78 352Z" fill="white"/>
+  <path d="M286 142L348 196L286 250V220L238 181L257 160L286 185V142Z" fill="white"/>
+  <path d="M286 262L348 316L286 370V327L257 352L238 331L286 293V262Z" fill="white"/>
+
+  <path d="M106 354L256 238L256 476L106 354Z" fill="url(#cut)"/>
+
+  <circle cx="144" cy="126" r="18" fill="white" fill-opacity="0.22"/>
+  <circle cx="356" cy="254" r="18" fill="white" fill-opacity="0.35"/>
+  <circle cx="240" cy="418" r="24" fill="white" fill-opacity="0.95"/>
+
+  <circle cx="256" cy="256" r="132" stroke="white" stroke-opacity="0.18" stroke-width="16"/>
+  <circle cx="256" cy="256" r="170" stroke="white" stroke-opacity="0.14" stroke-width="16"/>
+  <circle cx="256" cy="256" r="205" stroke="white" stroke-opacity="0.10" stroke-width="16"/>
+</svg>
