@@ -279,6 +279,12 @@ class Flic2Coordinator:
     async def _async_reconnect_after_delay(self, delay: int) -> None:
         """Wait and then attempt reconnection."""
         await asyncio.sleep(delay)
+
+        # Clear the task reference before connecting so a failed reconnect
+        # can schedule a new retry from inside _async_connect.
+        if self._reconnect_task is asyncio.current_task():
+            self._reconnect_task = None
+
         if self._running:
             await self._async_connect()
 
