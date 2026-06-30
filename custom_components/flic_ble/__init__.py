@@ -55,18 +55,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: FlicConfigEntry) -> bool
         sw_version=str(entry.data.get(CONF_FIRMWARE_VERSION, "")),
     )
 
-    # Set up platforms
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        # Start coordinator first so platforms see an active reconnect/self-heal loop.
+        await coordinator.async_start()
 
-    # Start coordinator
-    await coordinator.async_start()
-
-    # Register cleanup on unload
-    entry.async_on_unload(coordinator.async_stop)
+        # Set up platforms
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        await coordinator.async_stop()
+        raise
 
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: FlicConfigEntry) -> bool:
     """Unload a config entry."""
+    coordinator = entry.runtime_data
+    await coordinator.async_stop()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

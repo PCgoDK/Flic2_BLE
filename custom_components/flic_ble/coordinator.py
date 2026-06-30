@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
+from bleak.exc import BleakError
 from homeassistant.components import bluetooth
 from homeassistant.const import CONF_DEVICE_ID, CONF_TYPE
 from homeassistant.core import HomeAssistant, callback
@@ -55,6 +57,11 @@ type FlicConfigEntry = ConfigEntry[Flic2Coordinator]
 class Flic2Coordinator:
     """Coordinator to manage connection and events for a Flic 2 button."""
 
+    _WATCHDOG_TIMEOUT = 60
+    _WATCHDOG_CHECK_INTERVAL = 10
+    _SCANNER_LOOP_INTERVAL = 30
+    _ACTIVE_SCAN_TIMEOUT = 8
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -82,7 +89,11 @@ class Flic2Coordinator:
         self._reconnect_task: asyncio.Task[None] | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._scanner_task: asyncio.Task[None] | None = None
         self._reconnect_attempt = 0
+        self._connect_lock = asyncio.Lock()
+        self._last_event_monotonic = time.monotonic()
 
         # Set up callbacks
         self._client.on_button_event = self._handle_button_event
@@ -118,7 +129,11 @@ class Flic2Coordinator:
     async def async_start(self) -> None:
         """Start the coordinator."""
         _LOGGER.debug("Starting Flic 2 coordinator for %s", self.address)
+        if self._running:
+            return
+
         self._running = True
+        self._last_event_monotonic = time.monotonic()
 
         # Register for Bluetooth unavailability tracking
         self.config_entry.async_on_unload(
@@ -130,114 +145,153 @@ class Flic2Coordinator:
             )
         )
 
+        self._watchdog_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self._async_watchdog_loop(),
+            f"flic_ble_watchdog_{self.address}",
+        )
+        self._scanner_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self._async_scanner_loop(),
+            f"flic_ble_scanner_{self.address}",
+        )
+
         # Start initial connection
-        await self._async_connect()
+        await self._async_connect(raise_auth_failed=True)
 
     async def async_stop(self) -> None:
         """Stop the coordinator."""
         _LOGGER.debug("Stopping Flic 2 coordinator for %s", self.address)
+        if not self._running:
+            return
+
         self._running = False
+        self._client.stop()
 
-        # Cancel reconnect task
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            try:
-                await self._reconnect_task
-            except asyncio.CancelledError:
-                pass
+        await self._async_cancel_task(self._reconnect_task)
+        await self._async_cancel_task(self._listen_task)
+        await self._async_cancel_task(self._keepalive_task)
+        await self._async_cancel_task(self._watchdog_task)
+        await self._async_cancel_task(self._scanner_task)
 
-        # Cancel listen task
-        if self._listen_task and not self._listen_task.done():
-            self._client.stop()
-            self._listen_task.cancel()
-            try:
-                await self._listen_task
-            except asyncio.CancelledError:
-                pass
-
-        # Cancel keepalive task
-        if self._keepalive_task and not self._keepalive_task.done():
-            self._keepalive_task.cancel()
-            try:
-                await self._keepalive_task
-            except asyncio.CancelledError:
-                pass
+        self._reconnect_task = None
+        self._listen_task = None
+        self._keepalive_task = None
+        self._watchdog_task = None
+        self._scanner_task = None
 
         # Disconnect client
         await self._client.disconnect()
         self._available = False
+        async_dispatcher_send(
+            self.hass,
+            f"{SIGNAL_CONNECTION_CHANGED}_{self.address}",
+            self._available,
+        )
 
-    async def _async_connect(self) -> None:
+    async def _async_cancel_task(self, task: asyncio.Task[None] | None) -> None:
+        """Cancel a background task and wait for it to finish."""
+        if not task or task.done():
+            return
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.debug("Background task cancellation raised", exc_info=True)
+
+    async def _async_connect(self, *, raise_auth_failed: bool = False) -> None:
         """Connect to the Flic 2 button."""
         if not self._running:
             return
 
-        ble_device = bluetooth.async_ble_device_from_address(
-            self.hass, self.address, connectable=True
-        )
-        if not ble_device:
-            _LOGGER.debug("Device %s not found, scheduling reconnect", self.address)
-            self._schedule_reconnect()
-            return
+        async with self._connect_lock:
+            if not self._running:
+                return
 
-        try:
-            _LOGGER.debug("Connecting to %s", self.address)
-            await self._client.connect(ble_device, timeout=CONNECTION_TIMEOUT)
+            if self._client.is_connected and self._client.is_ready:
+                _LOGGER.debug("Connection already ready for %s", self.address)
+                self._available = True
+                return
 
-            _LOGGER.debug("Performing quick verify for %s", self.address)
-            await self._client.quick_verify(timeout=QUICK_VERIFY_TIMEOUT)
+            await self._async_cancel_task(self._listen_task)
+            self._listen_task = None
+            await self._async_cancel_task(self._keepalive_task)
+            self._keepalive_task = None
 
-            _LOGGER.debug("Initializing button events for %s", self.address)
-            if not await self._client.init_button_events():
-                _LOGGER.warning("Failed to initialize button events for %s", self.address)
-                raise Exception("Failed to initialize button events")
-
-            self._available = True
-            self._reconnect_attempt = 0
-            _LOGGER.info("Connected and verified with %s", self.address)
-
-            # Start listening for events in background
-            self._listen_task = self.config_entry.async_create_background_task(
-                self.hass,
-                self._async_listen(),
-                f"flic_ble_listen_{self.address}",
+            ble_device = bluetooth.async_ble_device_from_address(
+                self.hass, self.address, connectable=True
             )
+            if not ble_device:
+                _LOGGER.debug("Device %s not found, scheduling reconnect", self.address)
+                self._schedule_reconnect(reason="device_not_found")
+                return
 
-            # Start keepalive loop in background to avoid idle disconnects.
-            self._keepalive_task = self.config_entry.async_create_background_task(
-                self.hass,
-                self._async_keepalive(),
-                f"flic_ble_keepalive_{self.address}",
-            )
+            try:
+                _LOGGER.debug("Connecting to %s", self.address)
+                await self._client.connect(ble_device, timeout=CONNECTION_TIMEOUT)
 
-        except PairingError as err:
-            error_msg = str(err)
-            _LOGGER.warning("Pairing error for %s: %s", self.address, error_msg)
-            self._available = False
-            await self._client.disconnect()
+                _LOGGER.debug("Performing quick verify for %s", self.address)
+                await self._client.quick_verify(timeout=QUICK_VERIFY_TIMEOUT)
 
-            # If the button doesn't have our pairing, trigger re-auth flow
-            if "no pairing exists" in error_msg.lower():
-                raise ConfigEntryAuthFailed(
-                    "Button pairing was lost. Please re-pair the device."
-                ) from err
+                _LOGGER.debug("Initializing button events for %s", self.address)
+                if not await self._client.init_button_events():
+                    _LOGGER.warning("Failed to initialize button events for %s", self.address)
+                    raise RuntimeError("Failed to initialize button events")
 
-            self._schedule_reconnect()
+                self._available = True
+                self._last_event_monotonic = time.monotonic()
+                self._reconnect_attempt = 0
+                _LOGGER.info("Connected and verified with %s", self.address)
 
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to connect to %s: %s, scheduling reconnect",
-                self.address,
-                err,
-            )
-            self._available = False
-            await self._client.disconnect()
-            self._schedule_reconnect()
+                # Start listening for events in background
+                self._listen_task = self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._async_listen(),
+                    f"flic_ble_listen_{self.address}",
+                )
+
+                # Start keepalive loop in background to avoid idle disconnects.
+                self._keepalive_task = self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._async_keepalive(),
+                    f"flic_ble_keepalive_{self.address}",
+                )
+
+            except asyncio.CancelledError:
+                _LOGGER.debug("Connect flow cancelled for %s", self.address)
+                raise
+            except PairingError as err:
+                error_msg = str(err)
+                _LOGGER.warning("Pairing error for %s: %s", self.address, error_msg)
+                self._available = False
+                await self._client.disconnect()
+
+                # If the button doesn't have our pairing, trigger re-auth flow
+                if raise_auth_failed and "no pairing exists" in error_msg.lower():
+                    raise ConfigEntryAuthFailed(
+                        "Button pairing was lost. Please re-pair the device."
+                    ) from err
+
+                self._schedule_reconnect(reason="pairing_error")
+            except (asyncio.TimeoutError, BleakError, Exception) as err:
+                _LOGGER.warning(
+                    "Failed to connect to %s: %s, scheduling reconnect",
+                    self.address,
+                    err,
+                )
+                self._available = False
+                await self._client.disconnect()
+                self._schedule_reconnect(reason="connect_error")
 
     async def _async_listen(self) -> None:
         """Listen for button events."""
         try:
             await self._client.listen()
+        except asyncio.CancelledError:
+            raise
         except Exception as err:
             _LOGGER.warning("Listen task ended for %s: %s", self.address, err)
         finally:
@@ -247,9 +301,9 @@ class Flic2Coordinator:
             if self._running:
                 _LOGGER.info("Connection lost to %s, scheduling reconnect", self.address)
                 self._available = False
-                self._schedule_reconnect()
+                self._schedule_reconnect(reason="listen_ended")
 
-    def _schedule_reconnect(self) -> None:
+    def _schedule_reconnect(self, *, reason: str, immediate: bool = False) -> None:
         """Schedule a reconnection attempt."""
         if not self._running:
             return
@@ -257,17 +311,23 @@ class Flic2Coordinator:
         if self._reconnect_task and not self._reconnect_task.done():
             return  # Already scheduled
 
-        delay = min(
-            RECONNECT_INTERVAL * (2 ** self._reconnect_attempt),
-            RECONNECT_MAX_INTERVAL,
-        )
-        self._reconnect_attempt += 1
+        if immediate:
+            delay = 0
+            attempt = self._reconnect_attempt
+        else:
+            delay = min(
+                RECONNECT_INTERVAL * (2 ** self._reconnect_attempt),
+                RECONNECT_MAX_INTERVAL,
+            )
+            self._reconnect_attempt += 1
+            attempt = self._reconnect_attempt
 
         _LOGGER.debug(
-            "Scheduling reconnect for %s in %ss (attempt %s)",
+            "Scheduling reconnect for %s in %ss (attempt %s, reason=%s)",
             self.address,
             delay,
-            self._reconnect_attempt,
+            attempt,
+            reason,
         )
 
         self._reconnect_task = self.config_entry.async_create_background_task(
@@ -278,7 +338,11 @@ class Flic2Coordinator:
 
     async def _async_reconnect_after_delay(self, delay: int) -> None:
         """Wait and then attempt reconnection."""
-        await asyncio.sleep(delay)
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
 
         # Clear the task reference before connecting so a failed reconnect
         # can schedule a new retry from inside _async_connect.
@@ -286,7 +350,13 @@ class Flic2Coordinator:
             self._reconnect_task = None
 
         if self._running:
-            await self._async_connect()
+            try:
+                await self._async_connect(raise_auth_failed=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.debug("Reconnect attempt failed", exc_info=True)
+                self._schedule_reconnect(reason="reconnect_exception")
 
     async def _async_keepalive(self) -> None:
         """Send periodic ping to keep the BLE link healthy."""
@@ -301,27 +371,106 @@ class Flic2Coordinator:
                     if await self._client.ping():
                         _LOGGER.debug("Keepalive ping succeeded for %s", self.address)
                         continue
+                except asyncio.CancelledError:
+                    raise
                 except Exception as err:
                     _LOGGER.warning("Keepalive ping error for %s: %s", self.address, err)
 
                 _LOGGER.warning("Keepalive ping failed for %s", self.address)
                 await self._client.disconnect()
                 self._available = False
-                self._schedule_reconnect()
+                self._schedule_reconnect(reason="keepalive_failed", immediate=True)
                 return
         except asyncio.CancelledError:
             return
+
+    async def _async_watchdog_loop(self) -> None:
+        """Watch for stale event streams and self-heal the BLE session."""
+        try:
+            while self._running:
+                await asyncio.sleep(self._WATCHDOG_CHECK_INTERVAL)
+
+                if not self._running:
+                    return
+
+                if not self._available or not self._client.is_connected:
+                    continue
+
+                idle_for = time.monotonic() - self._last_event_monotonic
+                if idle_for < self._WATCHDOG_TIMEOUT:
+                    continue
+
+                _LOGGER.warning(
+                    "Watchdog triggered for %s (no events for %.1fs), restarting BLE session",
+                    self.address,
+                    idle_for,
+                )
+                self._last_event_monotonic = time.monotonic()
+                await self._async_restart_connection(reason="watchdog_timeout")
+        except asyncio.CancelledError:
+            return
+
+    async def _async_scanner_loop(self) -> None:
+        """Continuously try to rediscover the button while disconnected."""
+        try:
+            while self._running:
+                await asyncio.sleep(self._SCANNER_LOOP_INTERVAL)
+
+                if not self._running:
+                    return
+
+                if self._client.is_connected:
+                    continue
+
+                # First use Home Assistant's scanner cache.
+                ble_device = bluetooth.async_ble_device_from_address(
+                    self.hass, self.address, connectable=True
+                )
+                if ble_device:
+                    _LOGGER.debug(
+                        "Device %s visible via HA Bluetooth cache, requesting reconnect",
+                        self.address,
+                    )
+                    self._schedule_reconnect(reason="scanner_cache_hit", immediate=True)
+                    continue
+
+                # Fallback active scan: callback registration happens per scan run.
+                try:
+                    devices = await self._client.scan(timeout=self._ACTIVE_SCAN_TIMEOUT)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    _LOGGER.debug("Fallback BLE scan failed for %s: %s", self.address, err)
+                    continue
+
+                if any(d.address.upper() == self.address.upper() for d in devices):
+                    _LOGGER.debug(
+                        "Device %s found during fallback active scan, requesting reconnect",
+                        self.address,
+                    )
+                    self._schedule_reconnect(reason="scanner_active_hit", immediate=True)
+        except asyncio.CancelledError:
+            return
+
+    async def _async_restart_connection(self, *, reason: str) -> None:
+        """Disconnect and request immediate reconnect."""
+        self._client.stop()
+        await self._client.disconnect()
+        self._available = False
+        self._schedule_reconnect(reason=reason, immediate=True)
 
     @callback
     def _handle_bluetooth_unavailable(
         self, service_info: bluetooth.BluetoothServiceInfoBleak
     ) -> None:
         """Handle Bluetooth device becoming unavailable."""
-        _LOGGER.debug("Bluetooth device %s became unavailable", self.address)
-        # Connection will be handled by the listen task ending
+        _LOGGER.warning("Bluetooth device %s became unavailable", self.address)
+        self._available = False
+        self._schedule_reconnect(reason="bluetooth_unavailable")
 
     def _handle_button_event(self, event: ButtonEvent) -> None:
         """Handle button event from client."""
+        self._last_event_monotonic = time.monotonic()
         _LOGGER.debug("Button event from %s: %s", self.address, event)
 
         # Map button event type to our event type string
@@ -388,6 +537,8 @@ class Flic2Coordinator:
 
         was_available = self._available
         self._available = state == ConnectionState.READY
+        if self._available:
+            self._last_event_monotonic = time.monotonic()
 
         if was_available != self._available:
             async_dispatcher_send(
@@ -395,6 +546,10 @@ class Flic2Coordinator:
                 f"{SIGNAL_CONNECTION_CHANGED}_{self.address}",
                 self._available,
             )
+
+        if self._running and state == ConnectionState.DISCONNECTED:
+            _LOGGER.info("Disconnected from %s, requesting reconnect", self.address)
+            self._schedule_reconnect(reason="state_disconnected")
 
     @callback
     def async_subscribe_events(

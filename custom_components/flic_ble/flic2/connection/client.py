@@ -103,6 +103,7 @@ class Flic2Client:
         self.on_button_event: Optional[Callable[[ButtonEvent], None]] = None
         self.on_connection_state_changed: Optional[Callable[[ConnectionState], None]] = None
         self.on_battery_level: Optional[Callable[[int], None]] = None
+        self._packet_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def connection_state(self) -> ConnectionState:
@@ -218,6 +219,10 @@ class Flic2Client:
             _LOGGER.info(f"Connected to {self._address}")
             return True
 
+        except asyncio.CancelledError:
+            self.connection_state = ConnectionState.DISCONNECTED
+            await self.disconnect()
+            raise
         except asyncio.TimeoutError:
             self.connection_state = ConnectionState.DISCONNECTED
             raise TimeoutError(f"Connection to {self._address} timed out")
@@ -227,6 +232,10 @@ class Flic2Client:
 
     async def disconnect(self):
         """Disconnect from button."""
+        for task in list(self._packet_tasks):
+            task.cancel()
+        self._packet_tasks.clear()
+
         if self._bleak_client:
             try:
                 if self._bleak_client.is_connected:
@@ -242,7 +251,7 @@ class Flic2Client:
 
     def _on_disconnect(self, client: BleakClient):
         """Handle disconnection."""
-        _LOGGER.info("Disconnected from button")
+        _LOGGER.info("Disconnected from button %s", self._address)
         self._session.reset()
         self.connection_state = ConnectionState.DISCONNECTED
         self._running = False
@@ -273,7 +282,9 @@ class Flic2Client:
         self._response_event.set()
 
         # Process packet asynchronously
-        asyncio.create_task(self._process_packet(data))
+        task = asyncio.create_task(self._process_packet(data))
+        self._packet_tasks.add(task)
+        task.add_done_callback(self._packet_tasks.discard)
 
     async def _process_packet(self, data: bytes):
         """Process received packet."""
